@@ -19,9 +19,8 @@ bool openLog(const char* date) {
 
   power_spi_enable(); // power on SPI
   digitalWrite(TF_EN_PIN, 1); // power up card
-  card.begin(TF_CS_PIN); // chip select
      
-  if (!card.init()) {
+  if (!card.init(0, TF_CS_PIN)) {
     powerDown();
     return false;
   }

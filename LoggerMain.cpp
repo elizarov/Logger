@@ -1,5 +1,8 @@
 #include <Timeout.h>
 #include <FixNum.h>
+#include <FmtRef.h>
+#include <Uptime.h>
+#include <OneWire.h>
 #include <DS18B20.h>
 #include <DS3231.h>
 #include <TWIMaster.h>
@@ -9,61 +12,86 @@
 #include "cts_print.h"
 #include "logging.h"
 #include "powersave.h"
-#include "FanControlData.h"
+#include "LoggerData.h"
 #include "Pins.h"
 
 #include <avr/sleep.h>
 
 //------- ALL TIME DEFS ------
 
-const unsigned long INITIAL_DUMP_INTERVAL = 2 * Timeout::SECOND;
-const unsigned long PERIODIC_DUMP_INTERVAL = 5 * Timeout::SECOND;
-const unsigned long PERIODIC_DUMP_SKEW = 1 * Timeout::SECOND;
+const long INITIAL_DUMP_INTERVAL = 2000;
+const long PERIODIC_DUMP_INTERVAL = 60000;
+const long PERIODIC_DUMP_SKEW = 5000;
 
 // must receive data from FanControl in this time or clear last received data
-const unsigned long RECEIVE_INTERVAL = 5 * Timeout::SECOND;
+const long RECEIVE_INTERVAL = 15000;
 
 //------- HARDWARE ------
 
-DS18B20 ds18b20(DS18B20_PIN);
+DS18B20 tempRefSensor(DS18B20_PIN);
 DS3231 rtc;
 
 //------- STATE ------
 
 DateTimeParser dtParser("[T:", "]");
 
-//------- FAN CONTROL LINK ------
+//------- LOGGER I2C LINK ------
 
-FanControlData data;
-FanControlData dataRx; // data that is being received
-LoggerData logger;
-LoggerData loggerTx; // data that is being transmitted
-Timeout receiveTimeout(RECEIVE_INTERVAL);
+volatile bool dataInUse; // true when data is being used for output (do not overwrite)
+volatile bool dataReceived;
+LoggerIn data;  // the most recent Ok received data
+LoggerIn dataRxBuf; // data that is being received in TWISlave ISR
 
-void twiSlaveCall(uint8_t addr, bool slaveTransmit) {
-  if (slaveTransmit) {
-    loggerTx = logger;
-    TWISlave.use(loggerTx);
-  } else
-    TWISlave.use(dataRx);
+volatile bool loggerNeedsUpdate; // true logger needs to be updated (when master is transmitting)
+volatile bool loggerUpdating; // true when logger is being updated
+LoggerOut logger;
+LoggerOut loggerTxBuf; // data that is being transmitted in TWISlave ISR
+
+Timeout receiveTimeout;
+
+// Called from TWISlave ISR
+void twiSlaveTransmit(uint8_t doneSize, bool more) {
+  if (doneSize == 0) {
+    if (!loggerUpdating)
+      loggerTxBuf = logger;
+    TWISlave.use(loggerTxBuf);
+  }
 }
 
-void twiSlaveDone(uint8_t size, bool slaveTransmit) {
-  if (slaveTransmit)
-    return; // don't care
-  if (size == sizeof(data) && dataRx.ok()) {
-    data = dataRx;
+// Called from TWISlave ISR
+void twiSlaveReceive(uint8_t doneSize, bool more) {
+  if (doneSize == 0) {
+    TWISlave.use(dataRxBuf);
+    loggerNeedsUpdate = true; // update logger asap for master will request it
+  } else if (!more && dataRxBuf.ok(doneSize)) {
+    if (!dataInUse) {
+      data = dataRxBuf;
+      dataReceived = true;
+    }  
+  }
+}
+
+inline void setupTWI() {
+  TWISlave.begin(LOGGER_ADDR);
+}
+
+inline void checkReceive() {
+  if (dataReceived) {
+    dataReceived = false;
     receiveTimeout.reset(RECEIVE_INTERVAL);
   }
 }
 
-void setupTWI() {
-  TWISlave.begin(FAN_CONTROL_ADDR);
-}
-
-void checkReceive() {
-  if (receiveTimeout.check())
-    data.clear();
+inline void checkTransmit() {
+  if (!loggerNeedsUpdate)
+    return;
+  loggerNeedsUpdate = false;  
+  loggerUpdating = true;
+  logger.tempRef = tempRefSensor.getTemp();
+  logger.voltage = getBatteryVoltage();
+  logger.charge = getChargeStatus();
+  logger.prepare();
+  loggerUpdating = false;
 }
 
 //------- DUMP STATE -------
@@ -72,107 +100,58 @@ const char HIGHLIGHT_CHAR = '*';
 
 boolean firstDump = true; 
 Timeout dump(INITIAL_DUMP_INTERVAL);
-char dumpLine[] = "[L:+??.? i+??.? ??% o+??.? ??% v??.?p?r?????b?.??c0;u00000000]* ";
 
-byte indexOf(byte start, char c) {
-  for (byte i = start; dumpLine[i] != 0; i++)
-    if (dumpLine[i] == c)
-      return i;
-  return 0;
-}
+char dumpPrefix[] = "[L:+??.? ";
+char dumpSuffix[] = " b?.??c0;u00000000]* ";
 
-#define POSITIONS0(P0,C2,POS,SIZE)                     \
-        byte POS = P0;                                \
-      	byte SIZE = indexOf(POS, C2) - POS;
+char* highlightPtr = FmtRef::find(dumpSuffix, HIGHLIGHT_CHAR);
 
-#define POSITIONS(P0,C1,C2,POS,SIZE)                  \
-        POSITIONS0(indexOf(P0, C1) + 1,C2,POS,SIZE)
-
-byte highlightPos = indexOf(0, HIGHLIGHT_CHAR);
-
-POSITIONS(    0, ':', ' ', tPos, tSize)
-POSITIONS( tPos, 'i', ' ', itPos, itSize)
-POSITIONS(itPos, ' ', '%', ihPos, ihSize)
-POSITIONS(ihPos, 'o', ' ', otPos, otSize)
-POSITIONS(otPos, ' ', '%', ohPos, ohSize)
-POSITIONS(ohPos, 'v', 'p', vPos, vSize)
-POSITIONS( vPos, 'p', 'r', pPos, pSize)
-POSITIONS( pPos, 'r', 'b', rPos, rSize)
-POSITIONS( rPos, 'b', 'c', bPos, bSize)
-POSITIONS( bPos, 'c', ';', cPos, cSize)
-POSITIONS( cPos, 'u', ']', uptimePos, uptimeSize)
-
-const unsigned long DAY_LENGTH_MS = 24 * 60 * 60000L;
-
-unsigned long daystart = 0;
-int updays = 0;
-
-inline void prepareDecimal(int x, int pos, uint8_t size, fmt_t fmt = FMT_NONE) {
-  formatDecimal(x, &dumpLine[pos], size, fmt);
-}
-
-template<typename T, prec_t prec> void prepareDecimal(FixNum<T,prec> x, int pos, uint8_t size, fmt_t fmt = (fmt_t)prec) {
-  x.format(&dumpLine[pos], size, fmt);
-}
+FmtRef tRef(dumpPrefix);
+FmtRef bRef(dumpSuffix, 'b');
+FmtRef cRef(dumpSuffix, 'c');
+FmtRef uRef(dumpSuffix, 'u');
 
 const char DUMP_REGULAR = 0;
 const char DUMP_FIRST = HIGHLIGHT_CHAR;
 
 void makeDump(char dumpType) {
   // Write our local temp
-  prepareDecimal(ds18b20.getTemp(), tPos, tSize, 1 | FMT_SIGN);
-
-  // Write received data 
-  prepareDecimal(data.tempIn, itPos, itSize, 1 | FMT_SIGN);
-  prepareDecimal(data.rhIn, ihPos, ihSize, FMT_ZERO);
-  prepareDecimal(data.tempOut, otPos, otSize, 1 | FMT_SIGN);
-  prepareDecimal(data.rhOut, ohPos, ohSize, FMT_ZERO);
-
-  // other status  
-  prepareDecimal(data.voltage, vPos, vSize, 1);
-  prepareDecimal(data.fanPower, pPos, pSize);
-  prepareDecimal(data.fanRPM, rPos, rSize);
-  prepareDecimal(getBatteryVoltage(), bPos, bSize, 2);
-  prepareDecimal(getChargeStatus(), cPos, cSize);
-
-  // prepare uptime
-  unsigned long time = millis();
-  while ((time - daystart) > DAY_LENGTH_MS) {
-    daystart += DAY_LENGTH_MS;
-    updays++;
-  }
-  prepareDecimal(updays, uptimePos, uptimeSize - 6, FMT_ZERO);
-  time -= daystart;
-  time /= 1000; // convert seconds
-  prepareDecimal(time % 60, uptimePos + uptimeSize - 2, 2, FMT_ZERO);
-  time /= 60; // minutes
-  prepareDecimal(time % 60, uptimePos + uptimeSize - 4, 2, FMT_ZERO);
-  time /= 60; // hours
-  prepareDecimal((int) time, uptimePos + uptimeSize - 6, 2, FMT_ZERO);
+  tRef = tempRefSensor.getTemp();
+  bRef = getBatteryVoltage();
+  cRef = (int8_t)getChargeStatus();
+  uRef = uptime();
 
   // print
   if (dumpType == DUMP_REGULAR) {
-    dumpLine[highlightPos] = 0;
+    *highlightPtr = 0;
   } else {
-    byte i = highlightPos;
-    dumpLine[i++] = dumpType;
+    char* ptr = highlightPtr;
+    *(ptr++) = dumpType;
     if (dumpType != HIGHLIGHT_CHAR)
-      dumpLine[i++] = HIGHLIGHT_CHAR; // must end with highlight (signal) char
-    dumpLine[i++] = 0; // and the very last char must be zero
+      *(ptr++) = HIGHLIGHT_CHAR; // must end with highlight (signal) char
+    *ptr = 0; // and the very last char must be zero
   }
   beginPrint();
-  Serial.println(dumpLine);
+  Serial.print(dumpPrefix);
+  dataInUse = true;
+  Serial.print(data.buf);
+  Serial.println(dumpSuffix);
   endPrint();
   // log
   DateTime::Str now = rtc.now().format();
   if (openLog(now)) {
+    dumpPrefix[0] = ' ';
     logFile.print('[');
     logFile.print(now);
-    dumpLine[0] = ' ';
-    logFile.println(dumpLine);
-    dumpLine[0] = '[';
+    logFile.print(dumpPrefix);
+    logFile.print(data.buf);
+    logFile.println(dumpSuffix);
+    dumpPrefix[0] = '[';
     closeLog();
   }
+  if (receiveTimeout.check())
+    data.clear(); // clear data after dumping if was not updated for too long
+  dataInUse = false;
   // prepare for next dump
   dump.reset(PERIODIC_DUMP_INTERVAL + random(-PERIODIC_DUMP_SKEW, PERIODIC_DUMP_SKEW));
   firstDump = false;
@@ -198,8 +177,9 @@ void setup() {
 
 void loop() {
   forceXBeeEnable(isPoweredOn());
-  ds18b20.check();
+  tempRefSensor.check();
   checkReceive();
+  checkTransmit();
   dumpState();
   while (Serial.available()) {
     char c = Serial.read();

@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include "FixNum.h"
-#include "FanControlData.h"
+#include "LoggerData.h"
 
 typedef fixnum16_2 voltage_t;
 
