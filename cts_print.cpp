@@ -63,11 +63,9 @@ void setXBeeMode(XBeeMode mode) {
   switchCurMode(mode);
 }
 
-XBeeMode getXBeeMode() {
-  return setMode;  
-}
-
-void beginPrint() {
+bool beginPrint() {
+  if (setMode == XBEE_OFF)
+    return false; // don't print at all when set to OFF
   // avoid printing too often (just in case...)
   while (!printTimeout.check())
     sleep_mode(); // just wait...
@@ -82,6 +80,7 @@ void beginPrint() {
     sleep_mode(); // just wait until CTS is asserted (low) or timeout
   }
   digitalWrite(CTS_PIN, 0); // stop pulling up CTS pin
+  return true; // print anyway, even if timeout waiting
 }
 
 void endPrint() {

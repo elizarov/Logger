@@ -12,9 +12,8 @@ enum XBeeMode {
 
 void setupPrint();
 void setXBeeMode(XBeeMode mode);
-XBeeMode getXBeeMode();
 
-void beginPrint();
+bool beginPrint();
 void endPrint();
 
 #endif

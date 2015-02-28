@@ -20,8 +20,8 @@
 //------- ALL TIME DEFS ------
 
 const long INITIAL_DUMP_INTERVAL = 2000;
-const long PERIODIC_DUMP_INTERVAL = 60000;
-const long PERIODIC_DUMP_SKEW = 5000;
+const long PERIODIC_DUMP_INTERVAL = 5000; //60000;
+const long PERIODIC_DUMP_SKEW = 500; //5000;
 
 // must receive data from FanControl in this time or clear last received data
 const long RECEIVE_INTERVAL = 15000;
@@ -146,9 +146,7 @@ void makeDump(char dumpType) {
       *(ptr++) = HIGHLIGHT_CHAR; // must end with highlight (signal) char
     *ptr = 0; // and the very last char must be zero
   }
-  if (getXBeeMode() != XBEE_OFF) {
-    // do not print to serial when XBee turned off to conserve power
-    beginPrint();
+  if (beginPrint()) {
     Serial.print(dumpPrefix);
     dataInUse = true;
     Serial.print(data.buf);
@@ -157,7 +155,8 @@ void makeDump(char dumpType) {
   }
   // log
   DateTime::Str now = rtc.now().format();
-  if (openLog(now)) {
+  uint8_t logError = openLog(now);
+  if (logError == 0) {
     dumpPrefix[0] = ' ';
     logFile.print('[');
     logFile.print(now);
@@ -166,6 +165,13 @@ void makeDump(char dumpType) {
     logFile.println(dumpSuffix);
     dumpPrefix[0] = '[';
     closeLog();
+  } else {
+    if (beginPrint()) {
+      Serial.print(F("{L:Logger error "));
+      Serial.print(logError, HEX);
+      Serial.println(F("}*"));
+      endPrint(); 
+    }
   }
   if (receiveTimeout.check())
     data.clear(); // clear data after dumping if was not updated for too long
@@ -187,11 +193,12 @@ void setup() {
   setupPrint();
   setupLog();
   setupTWI();
-  beginPrint();
-  Serial.print(F("{L:Logger started "));
-  Serial.print(rtc.now().format());
-  Serial.println(F("|T}*"));
-  endPrint();
+  if (beginPrint()) {
+    Serial.print(F("{L:Logger started "));
+    Serial.print(rtc.now().format());
+    Serial.println(F("|T}*"));
+    endPrint();
+  }
 }
 
 void loop() {
