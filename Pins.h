@@ -20,7 +20,7 @@ D1    PD1   TXD  /
 D2    PD2   RTC INT (INT0)
 D3    PD3   BEE CTS (INT1)  -----> XBEE PIN 12 (aka DIO7)
 D4    PD4   TF_EN
-D5    PD5  
+D5    PD5   POWER_BEE
 D6    PD6 
 D7    PD7 
 
@@ -44,7 +44,8 @@ A5    PC5   SCL  /
 */
 
 const uint8_t CTS_PIN = 3;
-const uint8_t TF_EN_PIN = 5;
+const uint8_t TF_EN_PIN = 4;
+const uint8_t POWER_BEE_PIN = 5;
 
 const uint8_t DS18B20_PIN = 8;
 const uint8_t SLEEP_RQ_PIN = 9;

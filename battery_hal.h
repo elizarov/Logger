@@ -9,6 +9,5 @@ typedef fixnum16_2 voltage_t;
 
 voltage_t getBatteryVoltage(); 
 Charge getChargeStatus(); 
-bool isPoweredOn();
 
 #endif

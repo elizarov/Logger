@@ -4,7 +4,6 @@
 #include "Pins.h"
 
 const unsigned long QUERY_TIMEOUT = 500L; // check charge status at most 2 times per second
-const int POWER_V_THRESHOLD = 4; // 4.00 Volts
 
 Timeout queryTimeout(0); // immediately check first time
 
@@ -43,7 +42,3 @@ Charge getChargeStatus() {
   return lastChargeStatus;
 }
 
-bool isPoweredOn() {
-  check();
-  return lastBatteryVoltage > POWER_V_THRESHOLD || lastChargeStatus != CHARGE_OFF;
-}

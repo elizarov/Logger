@@ -13,6 +13,11 @@ void powerDown() {
   power_spi_disable(); // power off SPI
 }
 
+void setupLog() {
+  pinMode(TF_EN_PIN, OUTPUT);
+  powerDown();
+}
+
 // Expects YY-MM-DD... string in date (reads first 8 chars)
 bool openLog(const char* date) {
   memcpy(&name, date, 8);

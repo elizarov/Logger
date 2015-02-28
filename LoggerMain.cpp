@@ -35,6 +35,21 @@ DS3231 rtc;
 
 DateTimeParser dtParser("[T:", "]");
 
+//------- VOLATEGE TO CONTROL BEE ------
+
+const voltage_t XBEE_ON_V_THRESHOLD = fixnum8_1(40); // 4.0 Volts
+const voltage_t XBEE_SLEEP_V_THRESHOLD = fixnum8_1(35); // 3.5 Volts
+
+void updateXBeeMode() {
+  voltage_t v = getBatteryVoltage();
+  if (v > XBEE_ON_V_THRESHOLD)
+    setXBeeMode(XBEE_ON);
+  else if (v > XBEE_SLEEP_V_THRESHOLD)
+    setXBeeMode(XBEE_SLEEP);
+  else  
+    setXBeeMode(XBEE_OFF);  
+}
+
 //------- LOGGER I2C LINK ------
 
 volatile bool dataInUse; // true when data is being used for output (do not overwrite)
@@ -131,12 +146,15 @@ void makeDump(char dumpType) {
       *(ptr++) = HIGHLIGHT_CHAR; // must end with highlight (signal) char
     *ptr = 0; // and the very last char must be zero
   }
-  beginPrint();
-  Serial.print(dumpPrefix);
-  dataInUse = true;
-  Serial.print(data.buf);
-  Serial.println(dumpSuffix);
-  endPrint();
+  if (getXBeeMode() != XBEE_OFF) {
+    // do not print to serial when XBee turned off to conserve power
+    beginPrint();
+    Serial.print(dumpPrefix);
+    dataInUse = true;
+    Serial.print(data.buf);
+    Serial.println(dumpSuffix);
+    endPrint();
+  }
   // log
   DateTime::Str now = rtc.now().format();
   if (openLog(now)) {
@@ -167,16 +185,17 @@ inline void dumpState() {
 void setup() {
   setupPowerSave();
   setupPrint();
+  setupLog();
   setupTWI();
   beginPrint();
-  print_C("{L:Logger started ");
-  print(rtc.now().format());
-  print_C("|T}*\r\n");
+  Serial.print(F("{L:Logger started "));
+  Serial.print(rtc.now().format());
+  Serial.println(F("|T}*"));
   endPrint();
 }
 
 void loop() {
-  forceXBeeEnable(isPoweredOn());
+  updateXBeeMode();
   tempRefSensor.check();
   checkReceive();
   checkTransmit();
