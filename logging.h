@@ -5,11 +5,12 @@
 #include <Fat16.h>
 
 extern Fat16 logFile;
+extern uint8_t lastCardError;
 
 void setupLog();
 
 // Expects YY-MM-DD... string in date (reads first 8 chars)
-uint8_t openLog(const char* date);
-void closeLog();
+bool openLog(const char* date);
+bool closeLog();
 
 #endif

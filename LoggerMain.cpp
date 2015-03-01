@@ -20,11 +20,8 @@
 //------- ALL TIME DEFS ------
 
 const long INITIAL_DUMP_INTERVAL = 2000;
-const long PERIODIC_DUMP_INTERVAL = 5000; //60000;
-const long PERIODIC_DUMP_SKEW = 500; //5000;
-
-// must receive data from FanControl in this time or clear last received data
-const long RECEIVE_INTERVAL = 15000;
+const long PERIODIC_DUMP_INTERVAL = 60000;
+const long PERIODIC_DUMP_SKEW = 5000;
 
 //------- HARDWARE ------
 
@@ -52,23 +49,17 @@ void updateXBeeMode() {
 
 //------- LOGGER I2C LINK ------
 
-volatile bool dataInUse; // true when data is being used for output (do not overwrite)
-volatile bool dataReceived;
 LoggerIn data;  // the most recent Ok received data
 LoggerIn dataRxBuf; // data that is being received in TWISlave ISR
 
 volatile bool loggerNeedsUpdate; // true logger needs to be updated (when master is transmitting)
-volatile bool loggerUpdating; // true when logger is being updated
 LoggerOut logger;
 LoggerOut loggerTxBuf; // data that is being transmitted in TWISlave ISR
-
-Timeout receiveTimeout;
 
 // Called from TWISlave ISR
 void twiSlaveTransmit(uint8_t doneSize, bool more) {
   if (doneSize == 0) {
-    if (!loggerUpdating)
-      loggerTxBuf = logger;
+    loggerTxBuf = logger;
     TWISlave.use(loggerTxBuf);
   }
 }
@@ -77,12 +68,9 @@ void twiSlaveTransmit(uint8_t doneSize, bool more) {
 void twiSlaveReceive(uint8_t doneSize, bool more) {
   if (doneSize == 0) {
     TWISlave.use(dataRxBuf);
-    loggerNeedsUpdate = true; // update logger asap for master will request it
+    loggerNeedsUpdate = true; // update logger asap, for master will request it
   } else if (!more && dataRxBuf.ok(doneSize)) {
-    if (!dataInUse) {
-      data = dataRxBuf;
-      dataReceived = true;
-    }  
+    data = dataRxBuf;
   }
 }
 
@@ -90,50 +78,54 @@ inline void setupTWI() {
   TWISlave.begin(LOGGER_ADDR);
 }
 
-inline void checkReceive() {
-  if (dataReceived) {
-    dataReceived = false;
-    receiveTimeout.reset(RECEIVE_INTERVAL);
-  }
-}
-
 inline void checkTransmit() {
   if (!loggerNeedsUpdate)
     return;
   loggerNeedsUpdate = false;  
-  loggerUpdating = true;
-  logger.tempRef = tempRefSensor.getTemp();
-  logger.voltage = getBatteryVoltage();
-  logger.charge = getChargeStatus();
-  logger.prepare();
-  loggerUpdating = false;
+  LoggerOut l; // used to fill in new data before copying to logger
+  l.tempRef = tempRefSensor.getTemp();
+  l.voltage = getBatteryVoltage();
+  l.charge = getChargeStatus();
+  l.lastError = lastCardError;
+  if (l.lastError == 0)
+    l.lastError = lastXBeeError;
+  l.prepare();
+  // disable interrupts and copy to destination
+  cli();
+  logger = l;
+  sei();
 }
 
 //------- DUMP STATE -------
 
 const char HIGHLIGHT_CHAR = '*';
 
-boolean firstDump = true; 
+bool firstDump = true; 
+uint8_t errorReported = 0;
 Timeout dump(INITIAL_DUMP_INTERVAL);
 
 char dumpPrefix[] = "[L:+??.? ";
-char dumpSuffix[] = " b?.??c0;u00000000]* ";
+char dumpBuf[MAX_LOGGER_IN_SIZE]; // copy received chars here
+char dumpSuffix[] = " b?.??c0;s00u00000000]* ";
 
 char* highlightPtr = FmtRef::find(dumpSuffix, HIGHLIGHT_CHAR);
 
 FmtRef tRef(dumpPrefix);
 FmtRef bRef(dumpSuffix, 'b');
 FmtRef cRef(dumpSuffix, 'c');
+FmtRef sRef(dumpSuffix, 's');
 FmtRef uRef(dumpSuffix, 'u');
 
 const char DUMP_REGULAR = 0;
 const char DUMP_FIRST = HIGHLIGHT_CHAR;
+const char DUMP_ERROR = 'e';
 
 void makeDump(char dumpType) {
   // Write our local temp
   tRef = tempRefSensor.getTemp();
   bRef = getBatteryVoltage();
   cRef = (int8_t)getChargeStatus();
+  sRef = (int8_t)lastCardError; // work around the fact that ufixnum at 0 is NAN
   uRef = uptime();
 
   // print
@@ -146,44 +138,50 @@ void makeDump(char dumpType) {
       *(ptr++) = HIGHLIGHT_CHAR; // must end with highlight (signal) char
     *ptr = 0; // and the very last char must be zero
   }
+  // Take a copy of data buffer and clear data (print only fresly received next time)
+  // Disable interrupts to read data atomically.
+  cli();
+  strcpy(dumpBuf, data.buf);
+  data.clear();
+  sei();
+  // print 
   if (beginPrint()) {
     Serial.print(dumpPrefix);
-    dataInUse = true;
-    Serial.print(data.buf);
+    Serial.print(dumpBuf);
     Serial.println(dumpSuffix);
     endPrint();
   }
   // log
-  DateTime::Str now = rtc.now().format();
-  uint8_t logError = openLog(now);
-  if (logError == 0) {
-    dumpPrefix[0] = ' ';
-    logFile.print('[');
-    logFile.print(now);
-    logFile.print(dumpPrefix);
-    logFile.print(data.buf);
-    logFile.println(dumpSuffix);
-    dumpPrefix[0] = '[';
-    closeLog();
-  } else {
-    if (beginPrint()) {
-      Serial.print(F("{L:Logger error "));
-      Serial.print(logError, HEX);
-      Serial.println(F("}*"));
-      endPrint(); 
-    }
+  DateTime now = rtc.now();
+  if (now.valid()) {
+    DateTime::Str nowStr = now.format();
+    if (openLog(nowStr)) {
+      dumpPrefix[0] = ' ';
+      logFile.print('[');
+      logFile.print(nowStr);
+      logFile.print(dumpPrefix);
+      logFile.print(dumpBuf);
+      logFile.println(dumpSuffix);
+      dumpPrefix[0] = '[';
+      closeLog();
+    } 
   }
-  if (receiveTimeout.check())
-    data.clear(); // clear data after dumping if was not updated for too long
-  dataInUse = false;
   // prepare for next dump
   dump.reset(PERIODIC_DUMP_INTERVAL + random(-PERIODIC_DUMP_SKEW, PERIODIC_DUMP_SKEW));
   firstDump = false;
 }
 
 inline void dumpState() {
-  if (dump.check())
-    makeDump(firstDump ? DUMP_FIRST : DUMP_REGULAR);
+  if (dump.check()) {
+    if (firstDump)
+      makeDump(DUMP_FIRST);
+    else if (errorReported != lastCardError) {
+      errorReported = lastCardError;
+      makeDump(DUMP_ERROR);
+    } else {
+      makeDump(DUMP_REGULAR);
+    }
+  }
 }
 
 //------- SETUP & MAIN -------
@@ -196,7 +194,8 @@ void setup() {
   if (beginPrint()) {
     Serial.print(F("{L:Logger started "));
     Serial.print(rtc.now().format());
-    Serial.println(F("|T}*"));
+    Serial.println(F("}*"));
+    Serial.println(F("<L:T>"));
     endPrint();
   }
 }
@@ -204,7 +203,6 @@ void setup() {
 void loop() {
   updateXBeeMode();
   tempRefSensor.check();
-  checkReceive();
   checkTransmit();
   dumpState();
   while (Serial.available()) {
